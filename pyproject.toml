@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fastapi-iranian-bank-gateways"
-version = "0.1.0"
+version = "0.2.0"
 description = "FastAPI integration for all major Iranian bank payment gateways"
 readme = "README.md"
 license = { file = "LICENSE" }
