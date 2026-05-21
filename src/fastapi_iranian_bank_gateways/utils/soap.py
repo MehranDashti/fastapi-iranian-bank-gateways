@@ -9,11 +9,11 @@ def get_soap_client(wsdl_url: str) -> Any:
     Install SOAP support: pip install "fastapi-iranian-bank-gateways[soap]"
     """
     try:
-        import zeep  # type: ignore[import-not-found]
+        import zeep  # type: ignore
     except ImportError:
         raise MissingDependencyError(
             "zeep is required for SOAP-based gateways (Mellat, Sepah, Parsian). "
             'Install it with: pip install "fastapi-iranian-bank-gateways[soap]"',
             gateway=None,
         )
-    return zeep.Client(wsdl=wsdl_url)
+    return zeep.Client(wsdl=wsdl_url)  # type: ignore

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "fastapi-iranian-bank-gateways"
-version = "0.2.0"
+version = "0.2.1"
 description = "FastAPI integration for all major Iranian bank payment gateways"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -89,3 +89,7 @@ select = ["E", "F", "I", "UP"]
 [tool.mypy]
 python_version = "3.10"
 strict = true
+
+[[tool.mypy.overrides]]
+module = "fastapi_iranian_bank_gateways.utils.soap"
+warn_unused_ignores = false
