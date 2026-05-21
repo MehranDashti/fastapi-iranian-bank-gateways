@@ -4,15 +4,14 @@ on:
   push:
     tags:
       - "v*.*.*"
-
-permissions:
-  contents: write   # create GitHub Release
-  id-token: write   # OIDC Trusted Publisher (no stored API key)
+  workflow_dispatch:
 
 jobs:
-  build:
-    name: Build distribution
+  publish:
+    name: Build and publish
     runs-on: ubuntu-latest
+    environment: pypi
+
     steps:
       - uses: actions/checkout@v4
 
@@ -20,49 +19,16 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install build tools
-        run: pip install build
+        run: pip install build twine
 
-      - name: Build wheel and sdist
+      - name: Build distribution
         run: python -m build
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-  publish-pypi:
-    name: Publish to PyPI
-    needs: build
-    runs-on: ubuntu-latest
-    environment: pypi
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-
-  github-release:
-    name: Create GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: twine upload --skip-existing dist/*
