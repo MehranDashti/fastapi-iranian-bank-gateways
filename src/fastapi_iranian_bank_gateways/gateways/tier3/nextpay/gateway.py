@@ -53,8 +53,8 @@ class NextPayGateway(AbstractGateway):
     async def verify(self, callback_data: BankCallbackData) -> PaymentResult:
         raw = callback_data.raw
         trans_id = str(raw.get("trans_id", ""))
-        order_id = str(raw.get("order_id", raw.get("_order_id", "")))
-        amount = raw.get("_amount") or raw.get("amount")
+        order_id = str(raw.get("order_id") or callback_data.order_id or raw.get("_order_id", ""))
+        amount = callback_data.amount or raw.get("_amount") or raw.get("amount")
 
         try:
             async with httpx.AsyncClient(timeout=self.config.timeout) as client:

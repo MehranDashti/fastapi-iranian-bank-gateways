@@ -10,6 +10,8 @@ class BankCallbackData(BaseModel):
 
     gateway_slug: str
     raw: dict[str, Any]
+    amount: int | None = None
+    order_id: str | None = None
 
 
 class PaymentResult(BaseModel):

@@ -65,7 +65,7 @@ class ZarinpalGateway(AbstractGateway):
 
     async def verify(self, callback_data: BankCallbackData) -> PaymentResult:
         raw = callback_data.raw
-        order_id = str(raw.get("_order_id", ""))
+        order_id = str(callback_data.order_id or raw.get("_order_id", ""))
 
         if raw.get("Status") != "OK":
             return PaymentResult(
@@ -75,13 +75,13 @@ class ZarinpalGateway(AbstractGateway):
                 raw_response=raw,
             )
 
-        amount = raw.get("_amount")
+        amount = callback_data.amount or raw.get("_amount")
         if not amount:
             return PaymentResult(
                 status=PaymentStatus.FAILED,
                 gateway_slug=self.gateway_slug,
                 order_id=order_id,
-                error_message="Could not determine order amount for verification",
+                error_message="amount required for Zarinpal verify; pass it to parse_callback()",
                 raw_response=raw,
             )
 

@@ -1,56 +1,73 @@
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
+import pytest
 
 from fastapi_iranian_bank_gateways import GatewayManager
+from fastapi_iranian_bank_gateways.exceptions.errors import GatewayConfigurationError
 from fastapi_iranian_bank_gateways.gateways import IDPayGateway, ZarinpalGateway
 from fastapi_iranian_bank_gateways.gateways.tier3.idpay import IDPayConfig
 from fastapi_iranian_bank_gateways.gateways.tier3.zarinpal import ZarinpalConfig
 
-
-def make_manager(*gateways):
-    async def get_order_info(order_id): return {"amount": 100000}
-    async def on_success(r): return f"https://shop.com/ok/{r.order_id}"
-    async def on_failure(r): return f"https://shop.com/fail/{r.order_id}"
-
-    return GatewayManager(
-        gateways=list(gateways),
-        get_order_info=get_order_info,
-        on_success=on_success,
-        on_failure=on_failure,
-        prefix="/pay",
-    )
-
-
 _MERCHANT = "test-merchant-00000000000000000"
 
 
-def test_manager_registers_gateways():
-    gw = ZarinpalGateway(ZarinpalConfig(merchant_id=_MERCHANT, sandbox=True))
-    manager = make_manager(gw)
-    assert "zarinpal" in manager._registry
+def make_zarinpal() -> ZarinpalGateway:
+    return ZarinpalGateway(ZarinpalConfig(merchant_id=_MERCHANT, sandbox=True))
 
 
-def test_manager_multiple_gateways():
-    gw1 = ZarinpalGateway(ZarinpalConfig(merchant_id=_MERCHANT, sandbox=True))
-    gw2 = IDPayGateway(IDPayConfig(api_key="key", sandbox=True))
-    manager = make_manager(gw1, gw2)
+def make_idpay() -> IDPayGateway:
+    return IDPayGateway(IDPayConfig(api_key="test-key", sandbox=True))
+
+
+def test_manager_registers_single_gateway():
+    manager = GatewayManager(gateways=[make_zarinpal()])
+    assert "zarinpal" in manager
+
+
+def test_manager_registers_multiple_gateways():
+    manager = GatewayManager(gateways=[make_zarinpal(), make_idpay()])
     assert len(manager._registry) == 2
+    assert "zarinpal" in manager
+    assert "idpay" in manager
 
 
-def test_router_404_on_unknown_gateway():
-    gw = ZarinpalGateway(ZarinpalConfig(merchant_id=_MERCHANT, sandbox=True))
-    manager = make_manager(gw)
-    app = FastAPI()
-    app.include_router(manager.router)
-    client = TestClient(app, follow_redirects=False)
-
-    resp = client.post("/pay/nonexistent/verify")
-    assert resp.status_code == 404
+def test_get_returns_correct_gateway():
+    gw = make_zarinpal()
+    manager = GatewayManager(gateways=[gw])
+    assert manager.get("zarinpal") is gw
 
 
-def test_router_has_correct_routes():
-    gw = ZarinpalGateway(ZarinpalConfig(merchant_id=_MERCHANT, sandbox=True))
-    manager = make_manager(gw)
-    routes = {r.path for r in manager.router.routes}
-    assert "/pay/{gateway}/pay" in routes
-    assert "/pay/{gateway}/verify" in routes
+def test_getitem_returns_correct_gateway():
+    gw = make_zarinpal()
+    manager = GatewayManager(gateways=[gw])
+    assert manager["zarinpal"] is gw
+
+
+def test_get_unknown_slug_raises_configuration_error():
+    manager = GatewayManager(gateways=[make_zarinpal()])
+    with pytest.raises(GatewayConfigurationError, match="not registered"):
+        manager.get("nonexistent")
+
+
+def test_get_error_lists_available_gateways():
+    manager = GatewayManager(gateways=[make_zarinpal(), make_idpay()])
+    with pytest.raises(GatewayConfigurationError, match="zarinpal"):
+        manager.get("bogus")
+
+
+def test_slugs_returns_registered_slugs():
+    manager = GatewayManager(gateways=[make_zarinpal(), make_idpay()])
+    assert set(manager.slugs()) == {"zarinpal", "idpay"}
+
+
+def test_contains_operator():
+    manager = GatewayManager(gateways=[make_zarinpal()])
+    assert "zarinpal" in manager
+    assert "mellat" not in manager
+
+
+@pytest.mark.asyncio
+async def test_context_manager_opens_and_closes_client():
+    manager = GatewayManager(gateways=[make_zarinpal()])
+    assert manager._shared_client is None
+    async with manager:
+        assert manager._shared_client is not None
+    assert manager._shared_client is None

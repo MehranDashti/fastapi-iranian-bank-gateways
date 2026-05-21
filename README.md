@@ -8,7 +8,7 @@
 
 A pip-installable Python package providing **FastAPI integration for all major Iranian bank payment gateways** (درگاه‌های پرداخت بانکی ایران).
 
-Drop 17 gateways into any FastAPI app in minutes — no database required, fully async, Pydantic v2.
+A **toolkit**, not a framework — you own your routes and your business logic. The library handles the bank protocol: initiating payments, parsing callbacks, and verifying transactions.
 
 ---
 
@@ -25,11 +25,12 @@ Drop 17 gateways into any FastAPI app in minutes — no database required, fully
   - [Tier 3 — Fintech Aggregators](#tier-3--fintech-aggregators)
 - [PaymentRequest Fields](#paymentrequest-fields)
 - [PaymentResult Fields](#paymentresult-fields)
-- [GatewayManager Options](#gatewaymanager-options)
+- [GatewayManager](#gatewaymanager)
+- [GatewayFactory](#gatewayfactory)
 - [Error Handling](#error-handling)
 - [Advanced Usage](#advanced-usage)
 - [Writing a Custom Gateway](#writing-a-custom-gateway)
-- [Testing & Sandbox](#testing--sandbox)
+- [Testing](#testing)
 - [License](#license)
 
 ---
@@ -37,14 +38,15 @@ Drop 17 gateways into any FastAPI app in minutes — no database required, fully
 ## Features
 
 - **17 gateways** — all major Iranian bank PSPs and fintech aggregators
-- **Unified interface** — one `GatewayManager` mounts all routes automatically
-- **No database dependency** — you provide three async callbacks; the library handles the rest
-- **Async-first** — built on `httpx` and FastAPI async routes throughout
+- **Toolkit pattern** — you write your own routes; the library handles bank protocols
+- **Fully async** — built on `httpx` and FastAPI async routes throughout
 - **SOAP gateways** supported via optional `zeep` dependency
 - **Pydantic v2** models for type-safe configs and responses
 - **Sandbox/test mode** — `sandbox=True` flag on every config
 - **Duplicate payment detection** — `PaymentStatus.DUPLICATE` for idempotent retries
 - **Auto-submit HTML forms** — Mellat, Saderat, Saman, Parsian handled transparently
+- **`InMemoryAdapter`** for fast, zero-mock unit tests
+- **`GatewayFactory`** — create gateways from a config dict or environment variables
 
 ---
 
@@ -89,7 +91,7 @@ Drop 17 gateways into any FastAPI app in minutes — no database required, fully
 ## Installation
 
 ```bash
-# REST-only gateways (Zarinpal, IDPay, Zibal, Saderat, Pasargad, Saman, Melli, Irankish, Tejarat, Eghtesad Novin, NextPay, PayIr, PayPing, Vandar)
+# REST-only gateways
 pip install fastapi-iranian-bank-gateways
 
 # With SOAP support — adds zeep for Mellat, Sepah, Parsian
@@ -106,69 +108,80 @@ pip install "fastapi-iranian-bank-gateways[all]"
 ## Quick Start
 
 ```python
-from fastapi import FastAPI
-from fastapi_iranian_bank_gateways import GatewayManager, PaymentResult
-from fastapi_iranian_bank_gateways.gateways import ZarinpalGateway, MellatGateway
-from fastapi_iranian_bank_gateways.gateways.tier3.zarinpal import ZarinpalConfig
-from fastapi_iranian_bank_gateways.gateways.tier1.mellat import MellatConfig
-
-app = FastAPI()
-
-
-# 1. Define your three async callbacks
-async def get_order_info(order_id: str) -> dict:
-    """Return the order amount and description from your database."""
-    order = await db.orders.get(order_id)
-    return {"amount": order.total_rials, "description": f"Order #{order_id}"}
-
-
-async def on_success(result: PaymentResult) -> str:
-    """Called after a successful bank verification. Return a redirect URL."""
-    await db.orders.mark_paid(
-        order_id=result.order_id,
-        reference_id=result.reference_id,
-        transaction_id=result.transaction_id,
-    )
-    return f"https://my-shop.com/orders/{result.order_id}/success"
-
-
-async def on_failure(result: PaymentResult) -> str:
-    """Called after a failed or cancelled payment. Return a redirect URL."""
-    return f"https://my-shop.com/orders/{result.order_id}/failed?code={result.error_code}"
-
-
-# 2. Configure your gateways
-manager = GatewayManager(
-    gateways=[
-        ZarinpalGateway(ZarinpalConfig(
-            merchant_id="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-            sandbox=True,
-        )),
-        MellatGateway(MellatConfig(
-            terminal_id=12345678,
-            username="terminal_user",
-            password="terminal_pass",
-        )),
-    ],
-    get_order_info=get_order_info,
-    on_success=on_success,
-    on_failure=on_failure,
-    prefix="/payments",
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse
+from fastapi_iranian_bank_gateways import (
+    GatewayFactory, GatewayManager, PaymentRequest, PaymentStatus,
 )
+from fastapi_iranian_bank_gateways.strategies import handle_initiate_response
 
-# 3. Mount the router — done!
-app.include_router(manager.router)
-```
+# --- 1. Configure gateways ---
+# From env vars:  GATEWAY_ZARINPAL_MERCHANT_ID=...  GATEWAY_ZARINPAL_SANDBOX=true
+manager = GatewayManager(gateways=GatewayFactory.from_env("GATEWAY_"))
 
-This registers the following routes automatically:
+# Or explicitly:
+# manager = GatewayManager(gateways=[
+#     GatewayFactory.create("zarinpal", {"merchant_id": "...", "sandbox": True}),
+# ])
 
-```
-POST /payments/zarinpal/pay        Initiate Zarinpal payment
-GET  /payments/zarinpal/verify     Zarinpal bank callback (redirect)
-POST /payments/mellat/pay          Initiate Mellat payment
-POST /payments/mellat/verify       Mellat bank callback (form POST)
-GET  /payments/{gateway}/verify    Generic GET callback (all gateways)
-POST /payments/{gateway}/verify    Generic POST callback (all gateways)
+
+# --- 2. Open a shared connection pool in FastAPI lifespan ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with manager:
+        yield
+
+app = FastAPI(lifespan=lifespan)
+
+
+# --- 3. Initiate a payment — developer's own route ---
+@app.post("/pay/{gateway_slug}")
+async def initiate_payment(gateway_slug: str, req: PaymentRequest):
+    gw = manager.get(gateway_slug)
+    result = await gw.initiate(req)
+    # Returns 302 RedirectResponse or 200 HTMLResponse (auto-submit form)
+    return handle_initiate_response(result)
+
+
+# --- 4. Handle bank callback — developer's own route ---
+@app.get("/callback/{gateway_slug}")   # GET for most gateways
+async def payment_callback(gateway_slug: str, request: Request):
+    gw = manager.get(gateway_slug)
+
+    # For gateways that don't send amount/order_id in the callback (e.g. Zarinpal),
+    # fetch them from your database and pass explicitly:
+    order = await db.get_order_by_authority(request.query_params.get("Authority"))
+    result = await gw.verify(
+        gw.parse_callback(
+            dict(request.query_params),
+            amount=order.amount,      # Rials, from your DB
+            order_id=order.id,        # from your DB
+        )
+    )
+
+    if result.status in (PaymentStatus.SUCCESS, PaymentStatus.DUPLICATE):
+        await db.mark_order_paid(result.order_id, ref=result.reference_id)
+        return RedirectResponse(f"/success?ref={result.reference_id}")
+    return RedirectResponse(f"/failure?order={result.order_id}&code={result.error_code}")
+
+
+# --- 5. POST callback (for Mellat, IDPay, Melli, etc.) ---
+@app.post("/callback/{gateway_slug}")
+async def payment_callback_post(gateway_slug: str, request: Request):
+    gw = manager.get(gateway_slug)
+    form = await request.form()
+
+    # Most POST-callback gateways include order_id in the form data
+    order = await db.get_order(form.get("orderId") or form.get("order_id"))
+    result = await gw.verify(
+        gw.parse_callback(dict(form), amount=order.amount, order_id=order.id)
+    )
+
+    if result.status in (PaymentStatus.SUCCESS, PaymentStatus.DUPLICATE):
+        await db.mark_order_paid(result.order_id, ref=result.reference_id)
+        return RedirectResponse(f"/success?ref={result.reference_id}")
+    return RedirectResponse(f"/failure?order={result.order_id}")
 ```
 
 ---
@@ -178,56 +191,81 @@ POST /payments/{gateway}/verify    Generic POST callback (all gateways)
 ### Payment Flow
 
 ```
-Your frontend                  Your FastAPI app               Bank
-     │                               │                          │
-     │  POST /payments/zarinpal/pay  │                          │
-     │ ──────────────────────────►  │                          │
-     │                               │  POST to Zarinpal API   │
-     │                               │ ──────────────────────► │
-     │                               │  ◄── authority token ── │
-     │  302 → bank payment page      │                          │
-     │ ◄────────────────────────── │                          │
-     │ ──────────────────────────────────────────────────────► │
-     │                    (user fills card details)             │
-     │                               │  GET /payments/zarinpal/verify?Authority=...&Status=OK
-     │                               │ ◄──────────────────────────────────────────────────── │
-     │                               │  POST verify to Zarinpal│
-     │                               │ ──────────────────────► │
-     │                               │  ◄── confirmed ──────── │
-     │                               │  on_success() callback  │
-     │  302 → your success page      │                          │
-     │ ◄────────────────────────── │                          │
+Your frontend              Your FastAPI app               Bank
+     │                           │                          │
+     │  POST /pay/zarinpal       │                          │
+     │  { order_id, amount,      │                          │
+     │    callback_url }         │                          │
+     │ ──────────────────────►  │                          │
+     │                           │  POST to bank API        │
+     │                           │ ──────────────────────► │
+     │                           │  ◄── authority token ── │
+     │  302 → bank payment page  │                          │
+     │ ◄─────────────────────── │                          │
+     │ ────────────────────────────────────────────────────►│
+     │               (user fills card details on bank page) │
+     │                           │  GET /callback/zarinpal  │
+     │                           │  ?Authority=...&Status=OK│
+     │                           │ ◄──────────────────────── │
+     │                           │  (look up order from DB) │
+     │                           │  POST verify to bank     │
+     │                           │ ──────────────────────► │
+     │                           │  ◄── confirmed ─────── │
+     │                           │  mark order as paid      │
+     │  302 → your success page  │                          │
+     │ ◄─────────────────────── │                          │
 ```
 
-### Initiate a Payment
+### The Two Gateway Methods
 
-Send a `POST` request to `/{prefix}/{gateway}/pay`:
+Every gateway exposes exactly two async methods:
 
-```bash
-curl -X POST http://localhost:8000/payments/zarinpal/pay \
-  -H "Content-Type: application/json" \
-  -d '{
-    "order_id": "ORDER-001",
-    "amount": 100000,
-    "callback_url": "https://my-shop.com/payments/zarinpal/verify",
-    "mobile": "09123456789",
-    "email": "user@example.com",
-    "description": "Purchase order #001"
-  }'
+```python
+# Step 1: start a payment — returns a redirect URL or HTML auto-submit form
+result: InitiateResponse = await gateway.initiate(PaymentRequest(
+    order_id="ORDER-001",
+    amount=100000,           # Rials
+    callback_url="https://myapp.com/callback/zarinpal",
+    description="Purchase",  # optional
+    mobile="09123456789",    # optional
+))
+
+# Step 2: verify after bank redirects back
+result: PaymentResult = await gateway.verify(
+    gateway.parse_callback(
+        dict(request.query_params),  # or dict(await request.form())
+        amount=100000,   # from your DB (required by Zarinpal and PayPing)
+        order_id="ORDER-001",  # from your DB
+    )
+)
 ```
 
-**Response:**
-- **Redirect gateways** (Zarinpal, Pasargad, Sepah, IDPay, Zibal, NextPay, Pay.ir, PayPing, Vandar, Melli, Irankish, Tejarat, Eghtesad Novin): `302 Redirect` to the bank's payment page.
-- **Form gateways** (Mellat, Saderat, Saman, Parsian): `200 HTML` page with a hidden auto-submit form that posts to the bank.
+### `parse_callback()` and the `amount` parameter
 
-### Verify Callback
+Some gateways (Zarinpal, PayPing) **require the order amount** when calling the bank's verify API. Since these gateways don't return the amount in their callback, you must fetch it from your own database and pass it explicitly:
 
-The bank redirects the user back to `/{prefix}/{gateway}/verify`. The library:
-1. Parses the callback parameters
-2. Calls `get_order_info(order_id)` to retrieve the expected amount
-3. Calls `gateway.verify()` to confirm with the bank
-4. Calls `on_success()` or `on_failure()` with a `PaymentResult`
-5. Redirects the user to the URL returned by your callback
+```python
+# Zarinpal callback only contains: Authority, Status
+authority = request.query_params.get("Authority")
+order = await db.get_order_by_authority(authority)
+
+result = await gw.verify(
+    gw.parse_callback(
+        dict(request.query_params),
+        amount=order.amount,    # REQUIRED for Zarinpal and PayPing
+        order_id=order.id,
+    )
+)
+```
+
+Most other gateways (IDPay, Zibal, Mellat, etc.) include all necessary data in their callback params and do not require `amount` to be passed.
+
+### Initiate Response Types
+
+- **`RedirectInitiateResponse`** — most gateways: redirect the user to `result.url`
+- **`FormInitiateResponse`** — Mellat, Saderat, Saman, Parsian: return `result.html` which auto-submits to the bank
+
+`handle_initiate_response(result)` handles both cases automatically.
 
 ---
 
@@ -250,7 +288,7 @@ MellatConfig(
     terminal_id=12345678,       # int — terminal ID from bank
     username="terminal_user",   # str — terminal username
     password="terminal_pass",   # str — terminal password
-    sandbox=False,              # bool — use sandbox WSDL
+    sandbox=False,
 )
 ```
 
@@ -373,7 +411,9 @@ TejaratConfig(
 #### Eghtesad Novin (اقتصاد نوین)
 
 ```python
-from fastapi_iranian_bank_gateways.gateways.tier2.eghtesad_novin import EghtesadNovinConfig, EghtesadNovinGateway
+from fastapi_iranian_bank_gateways.gateways.tier2.eghtesad_novin import (
+    EghtesadNovinConfig, EghtesadNovinGateway,
+)
 
 EghtesadNovinConfig(
     username="ipg_username",     # str
@@ -396,6 +436,8 @@ ZarinpalConfig(
     sandbox=True,   # uses sandbox.zarinpal.com
 )
 ```
+
+> **Note:** Zarinpal's verify API requires the order amount. Pass it to `parse_callback(amount=...)`.
 
 Sandbox merchant ID for testing: any 36-character string (e.g. `"00000000-0000-0000-0000-000000000000"`).
 
@@ -461,7 +503,8 @@ PayPingConfig(
 )
 ```
 
-> Note: PayPing amounts are in **Tomans** (IRR ÷ 10). The library converts automatically.
+> Note: PayPing amounts are in **Tomans** (IRR ÷ 10). The library converts automatically.  
+> **Note:** PayPing's verify API requires the order amount. Pass it to `parse_callback(amount=...)`.
 
 ---
 
@@ -479,18 +522,18 @@ VandarConfig(
 
 ## PaymentRequest Fields
 
-Passed as the JSON body to `POST /{prefix}/{gateway}/pay`.
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `order_id` | `str` | Yes | Your unique order/invoice identifier |
-| `amount` | `int` | Yes | Amount in **Rials (IRR)** — must be > 0 |
-| `callback_url` | `str` | Yes | Full URL the bank will redirect back to |
-| `currency` | `str` | No | `"IRR"` (default) or `"IRT"` |
-| `mobile` | `str` | No | Payer mobile number (used for pre-filling) |
-| `email` | `str` | No | Payer email address |
-| `description` | `str` | No | Payment description shown on bank page |
-| `metadata` | `dict` | No | Arbitrary extra data (passed through, not sent to bank) |
+```python
+PaymentRequest(
+    order_id="ORDER-001",                    # str   — your unique order identifier
+    amount=100000,                           # int   — amount in Rials (IRR), must be > 0
+    callback_url="https://myapp.com/cb/zp",  # str   — full URL the bank redirects back to
+    currency=Currency.IRR,                   # enum  — "IRR" (default)
+    mobile="09123456789",                    # str   — payer mobile (optional, pre-fills bank form)
+    email="user@example.com",               # str   — payer email (optional)
+    description="Order #001",               # str   — shown on bank payment page (optional)
+    metadata={},                            # dict  — passed through; not sent to bank
+)
+```
 
 > All amounts are in **Rials (IRR)**. For example, 10,000 Tomans = 100,000 Rials.
 
@@ -498,7 +541,7 @@ Passed as the JSON body to `POST /{prefix}/{gateway}/pay`.
 
 ## PaymentResult Fields
 
-Returned to your `on_success` / `on_failure` callbacks.
+Returned by `gateway.verify()`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -525,22 +568,100 @@ Returned to your `on_success` / `on_failure` callbacks.
 
 ---
 
-## GatewayManager Options
+## GatewayManager
+
+`GatewayManager` is a **registry + connection pool**. It holds your configured gateways and lets you look them up by slug in request handlers.
 
 ```python
-GatewayManager(
-    gateways=[...],           # list[AbstractGateway] — at least one required
-    get_order_info=...,       # async (order_id: str) -> dict
-    on_success=...,           # async (result: PaymentResult) -> str (redirect URL)
-    on_failure=...,           # async (result: PaymentResult) -> str (redirect URL)
-    prefix="",                # str — URL prefix for all routes (default: no prefix)
-    tags=["payments"],        # list[str] — OpenAPI tags
-)
+from fastapi_iranian_bank_gateways import GatewayManager
+
+manager = GatewayManager(gateways=[
+    ZarinpalGateway(ZarinpalConfig(merchant_id="...", sandbox=True)),
+    IDPayGateway(IDPayConfig(api_key="...", sandbox=True)),
+    MellatGateway(MellatConfig(terminal_id=123, username="u", password="p")),
+])
+
+# Look up a gateway in a request handler
+gw = manager.get("zarinpal")   # raises GatewayConfigurationError if not registered
+gw = manager["zarinpal"]       # same, using [] syntax
+
+# Check if a gateway is registered
+if "zarinpal" in manager:
+    ...
+
+# List registered slugs
+manager.slugs()  # ["zarinpal", "idpay", "mellat"]
 ```
 
-The `get_order_info` callback must return a dict with at least:
-- `amount` — `int`, order amount in Rials (used by some gateways during verify)
-- `description` — `str` (optional)
+### Shared Connection Pool (recommended for production)
+
+Use `GatewayManager` as an async context manager in the FastAPI lifespan to share one `httpx.AsyncClient` across all requests:
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with manager:   # opens shared HTTP client
+        yield             # closes on shutdown
+
+app = FastAPI(lifespan=lifespan)
+```
+
+---
+
+## GatewayFactory
+
+`GatewayFactory` creates gateway instances from a slug + config, without manual imports.
+
+### Create one gateway
+
+```python
+from fastapi_iranian_bank_gateways import GatewayFactory
+
+gw = GatewayFactory.create("zarinpal", {
+    "merchant_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "sandbox": True,
+})
+```
+
+### Create multiple gateways
+
+```python
+gateways = GatewayFactory.create_all({
+    "zarinpal": {"merchant_id": "...", "sandbox": True},
+    "mellat":   {"terminal_id": 12345678, "username": "u", "password": "p"},
+    "idpay":    {"api_key": "...", "sandbox": True},
+})
+manager = GatewayManager(gateways=gateways)
+```
+
+### Auto-discover from environment variables
+
+```bash
+# .env
+GATEWAY_ZARINPAL_MERCHANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+GATEWAY_ZARINPAL_SANDBOX=true
+GATEWAY_IDPAY_API_KEY=your-api-key
+GATEWAY_IDPAY_SANDBOX=true
+```
+
+```python
+gateways = GatewayFactory.from_env("GATEWAY_")
+manager = GatewayManager(gateways=gateways)
+```
+
+Convention: `{PREFIX}{SLUG_UPPER}_{FIELD_UPPER}=value`
+
+### List available slugs
+
+```python
+GatewayFactory.available_slugs()
+# ['eghtesad_novin', 'idpay', 'irankish', 'mellat', 'melli',
+#  'nextpay', 'parsian', 'pasargad', 'pay_ir', 'payping',
+#  'saderat', 'saman', 'sepah', 'tejarat', 'vandar', 'zarinpal', 'zibal']
+```
 
 ---
 
@@ -549,14 +670,14 @@ The `get_order_info` callback must return a dict with at least:
 All exceptions inherit from `GatewayError`.
 
 ```python
-from fastapi_iranian_bank_gateways.exceptions import (
-    GatewayError,             # base class
-    GatewayConfigurationError,# bad or missing config
-    GatewayConnectionError,   # network failure talking to bank
-    GatewayAuthError,         # token/auth request failed
-    GatewayPaymentError,      # bank rejected the payment
-    MissingDependencyError,   # zeep not installed for a SOAP gateway
-    DuplicatePaymentError,    # already verified (subclass of GatewayPaymentError)
+from fastapi_iranian_bank_gateways import (
+    GatewayError,              # base class
+    GatewayConfigurationError, # bad config or unknown gateway slug
+    GatewayConnectionError,    # network failure talking to bank
+    GatewayAuthError,          # token/auth request failed
+    GatewayPaymentError,       # bank rejected the payment
+    MissingDependencyError,    # zeep not installed for a SOAP gateway
+    DuplicatePaymentError,     # already verified (subclass of GatewayPaymentError)
 )
 ```
 
@@ -565,27 +686,35 @@ Every exception exposes:
 - `.code` — bank error code string (when available)
 - `.raw` — raw bank response dict (on `GatewayPaymentError`)
 
-### Catching errors in your callbacks
+### Handling errors in your routes
 
 ```python
-from fastapi_iranian_bank_gateways.exceptions import GatewayConnectionError, GatewayPaymentError
+from fastapi import HTTPException
+from fastapi_iranian_bank_gateways import GatewayConfigurationError, GatewayConnectionError
 
-async def on_failure(result: PaymentResult) -> str:
-    # result.error_code contains the bank's error code
-    # result.raw_response contains the full bank response
-    await log_failed_payment(result.order_id, result.error_code, result.raw_response)
-    return f"https://my-shop.com/failed?reason={result.error_code}"
+@app.post("/pay/{gateway_slug}")
+async def pay(gateway_slug: str, req: PaymentRequest):
+    try:
+        gw = manager.get(gateway_slug)
+    except GatewayConfigurationError:
+        raise HTTPException(status_code=404, detail="Gateway not found")
+
+    try:
+        result = await gw.initiate(req)
+    except GatewayConnectionError as e:
+        raise HTTPException(status_code=503, detail="Bank unreachable")
+
+    return handle_initiate_response(result)
 ```
 
 ### Handling SOAP missing dependency
 
 ```python
-from fastapi_iranian_bank_gateways.exceptions import MissingDependencyError
+from fastapi_iranian_bank_gateways import MissingDependencyError
 
 try:
     await mellat_gateway.initiate(request)
 except MissingDependencyError as e:
-    # str(e) includes the install command
     print(e)
     # → zeep is required for SOAP-based gateways (Mellat, Sepah, Parsian).
     #   Install it with: pip install "fastapi-iranian-bank-gateways[soap]"
@@ -595,92 +724,86 @@ except MissingDependencyError as e:
 
 ## Advanced Usage
 
-### Multiple gateways, single manager
-
-```python
-from fastapi_iranian_bank_gateways.gateways import (
-    ZarinpalGateway, IDPayGateway, MellatGateway,
-    SaderatGateway, SamanGateway, ZibalGateway,
-)
-
-manager = GatewayManager(
-    gateways=[
-        ZarinpalGateway(ZarinpalConfig(merchant_id="...", sandbox=True)),
-        IDPayGateway(IDPayConfig(api_key="...", sandbox=True)),
-        MellatGateway(MellatConfig(terminal_id=123, username="u", password="p")),
-        SaderatGateway(SaderatConfig(terminal_id="...")),
-        SamanGateway(SamanConfig(terminal_id="...", password="...")),
-        ZibalGateway(ZibalConfig(merchant="zibal")),
-    ],
-    get_order_info=get_order_info,
-    on_success=on_success,
-    on_failure=on_failure,
-)
-```
-
-### Integrating with Dependency Injection
-
-```python
-from fastapi import FastAPI, Depends
-from fastapi_iranian_bank_gateways import GatewayManager
-
-app = FastAPI()
-
-def get_manager() -> GatewayManager:
-    # Could be cached, loaded from settings, etc.
-    return GatewayManager(gateways=[...], ...)
-
-app.include_router(get_manager().router, prefix="/pay")
-```
-
-### Using Pydantic Settings for config
+### Loading config from `.env` with pydantic-settings
 
 ```python
 from pydantic_settings import BaseSettings
-from fastapi_iranian_bank_gateways.gateways.tier3.zarinpal import ZarinpalConfig
+from fastapi_iranian_bank_gateways import GatewayFactory, GatewayManager
 
 class Settings(BaseSettings):
     zarinpal_merchant_id: str
     zarinpal_sandbox: bool = False
+    idpay_api_key: str = ""
 
     model_config = {"env_file": ".env"}
 
 settings = Settings()
 
-zarinpal_config = ZarinpalConfig(
-    merchant_id=settings.zarinpal_merchant_id,
-    sandbox=settings.zarinpal_sandbox,
-)
+manager = GatewayManager(gateways=GatewayFactory.create_all({
+    "zarinpal": {
+        "merchant_id": settings.zarinpal_merchant_id,
+        "sandbox": settings.zarinpal_sandbox,
+    },
+}))
 ```
 
-`.env` file:
-```
-ZARINPAL_MERCHANT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-ZARINPAL_SANDBOX=true
-```
+### Supporting both GET and POST callbacks
 
-### Accessing the gateway registry
+Some gateways use GET (Zarinpal, Zibal, Pay.ir, PayPing, NextPay, Saderat, Saman, Pasargad), others use POST (Mellat, Melli, IDPay, Irankish, Tejarat, Eghtesad Novin, Sepah, Parsian, Vandar).
 
 ```python
-manager = GatewayManager(gateways=[zarinpal, mellat], ...)
+async def _handle_callback(gateway_slug: str, request: Request, amount: int, order_id: str):
+    gw = manager.get(gateway_slug)
+    if request.method == "POST":
+        form = await request.form()
+        params = dict(form)
+    else:
+        params = dict(request.query_params)
+    result = await gw.verify(gw.parse_callback(params, amount=amount, order_id=order_id))
+    return result
 
-# Direct gateway access (e.g. for custom verification logic)
-zarinpal = manager._registry["zarinpal"]
+@app.get("/callback/{gateway_slug}")
+async def cb_get(gateway_slug: str, request: Request):
+    order = await db.get_order(...)
+    result = await _handle_callback(gateway_slug, request, order.amount, order.id)
+    ...
+
+@app.post("/callback/{gateway_slug}")
+async def cb_post(gateway_slug: str, request: Request):
+    order = await db.get_order(...)
+    result = await _handle_callback(gateway_slug, request, order.amount, order.id)
+    ...
 ```
 
-### Custom callback URL per request
+### Storing the payment token for later lookup
 
-The `callback_url` in `PaymentRequest` is per-request, so you can construct it dynamically:
+When you call `gw.initiate()`, the response contains the authority/token from the bank. Store it with the order so you can look it up during the callback:
 
 ```python
-import httpx
+@app.post("/pay/{gateway_slug}")
+async def pay(gateway_slug: str, req: PaymentRequest):
+    gw = manager.get(gateway_slug)
+    result = await gw.initiate(req)
 
-async with httpx.AsyncClient() as client:
-    await client.post("http://localhost:8000/payments/zarinpal/pay", json={
-        "order_id": "ORDER-42",
-        "amount": 500000,
-        "callback_url": f"https://my-shop.com/payments/zarinpal/verify?order={order_id}",
-    })
+    if isinstance(result, RedirectInitiateResponse):
+        # Extract the authority token from the URL (Zarinpal-style)
+        authority = result.url.split("/")[-1]
+        await db.save_authority(req.order_id, authority)
+
+    return handle_initiate_response(result)
+
+@app.get("/callback/zarinpal")
+async def callback_zarinpal(Authority: str, Status: str):
+    order = await db.get_order_by_authority(Authority)
+    gw = manager.get("zarinpal")
+    result = await gw.verify(
+        gw.parse_callback(
+            {"Authority": Authority, "Status": Status},
+            amount=order.amount,
+            order_id=order.id,
+        )
+    )
+    ...
 ```
 
 ---
@@ -693,7 +816,9 @@ Subclass `AbstractGateway` to add a gateway not included in this package:
 from typing import ClassVar
 from fastapi_iranian_bank_gateways.base.gateway import AbstractGateway
 from fastapi_iranian_bank_gateways.base.config import BaseGatewayConfig
-from fastapi_iranian_bank_gateways.models.payment import PaymentRequest, InitiateResponse, RedirectInitiateResponse
+from fastapi_iranian_bank_gateways.models.payment import (
+    PaymentRequest, InitiateResponse, RedirectInitiateResponse,
+)
 from fastapi_iranian_bank_gateways.models.callback import BankCallbackData, PaymentResult
 from fastapi_iranian_bank_gateways.models.enums import PaymentStatus
 import httpx
@@ -730,29 +855,27 @@ class MyBankGateway(AbstractGateway):
             resp = await client.post("https://mybank.com/api/verify", json={
                 "api_key": self.config.api_key,
                 "token": raw.get("token"),
+                "amount": callback_data.amount or 0,
             })
         data = resp.json()
         return PaymentResult(
             status=PaymentStatus.SUCCESS if data["ok"] else PaymentStatus.FAILED,
             gateway_slug=self.gateway_slug,
-            order_id=str(raw.get("ref", "")),
+            order_id=str(callback_data.order_id or raw.get("ref", "")),
             reference_id=data.get("rrn"),
             raw_response=data,
         )
 
 
 # Use it like any built-in gateway
-manager = GatewayManager(
-    gateways=[MyBankGateway(MyBankConfig(api_key="...", sandbox=False))],
-    get_order_info=get_order_info,
-    on_success=on_success,
-    on_failure=on_failure,
-)
+manager = GatewayManager(gateways=[
+    MyBankGateway(MyBankConfig(api_key="...", sandbox=False)),
+])
 ```
 
 ---
 
-## Testing & Sandbox
+## Testing
 
 ### Sandbox mode
 
@@ -766,62 +889,119 @@ ZibalConfig(merchant="zibal")                      # use literal "zibal" for san
 PayIrConfig(api="test")                            # use literal "test" as api key
 ```
 
-### Testing your FastAPI app
+### Unit testing with InMemoryAdapter
+
+`InMemoryAdapter` is a zero-dependency test double that replaces real HTTP calls. No `respx` needed:
 
 ```python
 import pytest
-from fastapi.testclient import TestClient
-from fastapi_iranian_bank_gateways import GatewayManager, PaymentResult
-from fastapi_iranian_bank_gateways.gateways import ZarinpalGateway
-from fastapi_iranian_bank_gateways.gateways.tier3.zarinpal import ZarinpalConfig
-
-@pytest.fixture
-def client():
-    app = FastAPI()
-
-    async def get_order_info(order_id): return {"amount": 100000}
-    async def on_success(r): return f"https://shop.com/ok/{r.order_id}"
-    async def on_failure(r): return f"https://shop.com/fail/{r.order_id}"
-
-    manager = GatewayManager(
-        gateways=[ZarinpalGateway(ZarinpalConfig(merchant_id="test-id", sandbox=True))],
-        get_order_info=get_order_info,
-        on_success=on_success,
-        on_failure=on_failure,
-        prefix="/payments",
-    )
-    app.include_router(manager.router)
-    return TestClient(app, follow_redirects=False)
-```
-
-### Mocking HTTP calls in unit tests
-
-Use [respx](https://lundberg.github.io/respx/) to mock httpx:
-
-```python
-import httpx
-import respx
-from fastapi_iranian_bank_gateways.gateways import ZarinpalGateway
-from fastapi_iranian_bank_gateways.gateways.tier3.zarinpal import ZarinpalConfig
+from fastapi_iranian_bank_gateways.adapters import InMemoryAdapter
+from fastapi_iranian_bank_gateways.gateways.tier3.zarinpal import ZarinpalConfig, ZarinpalGateway
 from fastapi_iranian_bank_gateways.models.payment import PaymentRequest
+from fastapi_iranian_bank_gateways.models.enums import PaymentStatus
 
-@respx.mock
+REQUEST_URL = "https://sandbox.zarinpal.com/pg/v4/payment/request.json"
+VERIFY_URL = "https://sandbox.zarinpal.com/pg/v4/payment/verify.json"
+
+
 @pytest.mark.asyncio
 async def test_zarinpal_initiate():
-    respx.post("https://sandbox.zarinpal.com/pg/v4/payment/request.json").mock(
-        return_value=httpx.Response(200, json={
+    transport = InMemoryAdapter(responses={
+        REQUEST_URL: {
             "data": {"code": 100, "authority": "A000000000000000000000001234567890"},
             "errors": [],
-        })
+        },
+    })
+    gateway = ZarinpalGateway(
+        ZarinpalConfig(merchant_id="test-id", sandbox=True),
+        transport=transport,
     )
-    gateway = ZarinpalGateway(ZarinpalConfig(merchant_id="test-id", sandbox=True))
     result = await gateway.initiate(PaymentRequest(
         order_id="TEST-001",
         amount=100000,
-        callback_url="https://shop.com/verify",
+        callback_url="https://shop.com/callback/zarinpal",
     ))
     assert result.type == "redirect"
     assert "A000000000000000000000001234567890" in result.url
+
+
+@pytest.mark.asyncio
+async def test_zarinpal_verify_success():
+    transport = InMemoryAdapter(responses={
+        VERIFY_URL: {
+            "data": {"code": 100, "ref_id": 987654, "card_pan": "6037****1234"},
+            "errors": [],
+        },
+    })
+    gateway = ZarinpalGateway(
+        ZarinpalConfig(merchant_id="test-id", sandbox=True),
+        transport=transport,
+    )
+    result = await gateway.verify(
+        gateway.parse_callback(
+            {"Authority": "A000000000000000000000001234567890", "Status": "OK"},
+            amount=100000,
+            order_id="TEST-001",
+        )
+    )
+    assert result.status == PaymentStatus.SUCCESS
+    assert result.reference_id == "987654"
+```
+
+### Integration testing with TestClient
+
+```python
+import pytest
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse
+from fastapi.testclient import TestClient
+from fastapi_iranian_bank_gateways import GatewayManager, PaymentRequest, PaymentStatus
+from fastapi_iranian_bank_gateways.adapters import InMemoryAdapter
+from fastapi_iranian_bank_gateways.gateways.tier3.zarinpal import ZarinpalConfig, ZarinpalGateway
+from fastapi_iranian_bank_gateways.strategies import handle_initiate_response
+
+REQUEST_URL = "https://sandbox.zarinpal.com/pg/v4/payment/request.json"
+VERIFY_URL = "https://sandbox.zarinpal.com/pg/v4/payment/verify.json"
+
+
+@pytest.fixture
+def client():
+    transport = InMemoryAdapter(responses={
+        REQUEST_URL: {"data": {"code": 100, "authority": "TESTAUTH"}, "errors": []},
+        VERIFY_URL: {"data": {"code": 100, "ref_id": 123456}, "errors": []},
+    })
+    gw = ZarinpalGateway(ZarinpalConfig(merchant_id="test-id", sandbox=True), transport=transport)
+    manager = GatewayManager(gateways=[gw])
+    app = FastAPI()
+
+    @app.post("/pay/{gw_slug}")
+    async def pay(gw_slug: str, req: PaymentRequest):
+        return handle_initiate_response(await manager.get(gw_slug).initiate(req))
+
+    @app.get("/callback/{gw_slug}")
+    async def callback(gw_slug: str, request: Request):
+        gateway = manager.get(gw_slug)
+        result = await gateway.verify(
+            gateway.parse_callback(dict(request.query_params), amount=100000, order_id="O-001")
+        )
+        if result.status == PaymentStatus.SUCCESS:
+            return RedirectResponse(f"/success?ref={result.reference_id}", status_code=302)
+        return RedirectResponse("/failure", status_code=302)
+
+    return TestClient(app, follow_redirects=False)
+
+
+def test_full_flow(client):
+    resp = client.post("/pay/zarinpal", json={
+        "order_id": "O-001", "amount": 100000,
+        "callback_url": "https://myapp.com/callback/zarinpal",
+    })
+    assert resp.status_code == 302
+    assert "TESTAUTH" in resp.headers["location"]
+
+    resp = client.get("/callback/zarinpal", params={"Authority": "TESTAUTH", "Status": "OK"})
+    assert resp.status_code == 302
+    assert "success" in resp.headers["location"]
 ```
 
 ---
@@ -830,8 +1010,11 @@ async def test_zarinpal_initiate():
 
 ```
 src/fastapi_iranian_bank_gateways/
-├── __init__.py           GatewayManager, models, exceptions (public API)
-├── manager.py            GatewayManager + FastAPI router factory
+├── __init__.py           Public API: GatewayManager, GatewayFactory, models, strategies
+├── manager.py            GatewayManager (registry + connection pool)
+├── factory.py            GatewayFactory (slug-based creation, from_env)
+├── strategies.py         handle_initiate_response, RetryStrategy variants
+├── adapters.py           HttpxAdapter (production), InMemoryAdapter (testing)
 ├── base/
 │   ├── gateway.py        AbstractGateway ABC
 │   └── config.py         BaseGatewayConfig (Pydantic v2, frozen)
@@ -869,4 +1052,4 @@ Pull requests are welcome. To add a new gateway:
 2. Subclass `AbstractGateway` and `BaseGatewayConfig`
 3. Add the gateway to `gateways/__init__.py`
 4. Add tests in `tests/unit/test_{name}.py`
-5. Document the config fields in this README and in `memory/gateway_reference.md`
+5. Document the config fields in this README

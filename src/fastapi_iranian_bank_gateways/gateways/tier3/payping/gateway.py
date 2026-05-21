@@ -54,8 +54,8 @@ class PayPingGateway(AbstractGateway):
     async def verify(self, callback_data: BankCallbackData) -> PaymentResult:
         raw = callback_data.raw
         ref_id = str(raw.get("refid", ""))
-        order_id = str(raw.get("clientrefid", raw.get("_order_id", "")))
-        amount = raw.get("_amount")
+        order_id = str(raw.get("clientrefid") or callback_data.order_id or raw.get("_order_id", ""))
+        amount = callback_data.amount or raw.get("_amount")
 
         try:
             async with httpx.AsyncClient(timeout=self.config.timeout) as client:

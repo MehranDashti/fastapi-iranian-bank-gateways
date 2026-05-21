@@ -10,19 +10,39 @@ Supported gateways (17 total):
 
 Quick start::
 
-    from fastapi import FastAPI
-    from fastapi_iranian_bank_gateways import GatewayManager
-    from fastapi_iranian_bank_gateways.gateways import ZarinpalGateway
-    from fastapi_iranian_bank_gateways.gateways.tier3.zarinpal import ZarinpalConfig
-
-    app = FastAPI()
-    manager = GatewayManager(
-        gateways=[ZarinpalGateway(ZarinpalConfig(merchant_id="...", sandbox=True))],
-        get_order_info=lambda oid: {"amount": 50000},
-        on_success=lambda r: f"https://shop.com/success/{r.order_id}",
-        on_failure=lambda r: f"https://shop.com/failed/{r.order_id}",
+    from contextlib import asynccontextmanager
+    from fastapi import FastAPI, Request
+    from fastapi.responses import RedirectResponse
+    from fastapi_iranian_bank_gateways import (
+        GatewayFactory, GatewayManager, PaymentRequest, PaymentStatus,
     )
-    app.include_router(manager.router, prefix="/payments")
+    from fastapi_iranian_bank_gateways.strategies import handle_initiate_response
+
+    # Configure gateways from environment variables:
+    # GATEWAY_ZARINPAL_MERCHANT_ID=... GATEWAY_ZARINPAL_SANDBOX=true
+    manager = GatewayManager(gateways=GatewayFactory.from_env("GATEWAY_"))
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        async with manager:   # shared HTTP connection pool
+            yield
+
+    app = FastAPI(lifespan=lifespan)
+
+    @app.post("/pay/{gateway_slug}")
+    async def pay(gateway_slug: str, req: PaymentRequest):
+        gw = manager.get(gateway_slug)
+        result = await gw.initiate(req)
+        return handle_initiate_response(result)  # RedirectResponse or HTMLResponse
+
+    @app.get("/callback/{gateway_slug}")
+    async def callback(gateway_slug: str, request: Request):
+        gw = manager.get(gateway_slug)
+        result = await gw.verify(gw.parse_callback(dict(request.query_params)))
+        if result.status == PaymentStatus.SUCCESS:
+            # update your database here
+            return RedirectResponse(f"/success?ref={result.reference_id}")
+        return RedirectResponse(f"/failure?order={result.order_id}")
 """
 
 from .adapters import HttpTransportAdapter, HttpxAdapter, InMemoryAdapter
@@ -56,6 +76,7 @@ from .strategies import (
     NoRetryStrategy,
     RedirectInitiateStrategy,
     RetryStrategy,
+    handle_initiate_response,
 )
 
 __version__ = "0.1.0"
@@ -89,6 +110,7 @@ __all__ = [
     "AbstractGateway",
     "BaseGatewayConfig",
     # Strategies
+    "handle_initiate_response",
     "InitiateResponseStrategy",
     "FormInitiateStrategy",
     "RedirectInitiateStrategy",

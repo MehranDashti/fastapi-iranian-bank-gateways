@@ -60,12 +60,25 @@ class AbstractGateway(ABC):
         """
         ...
 
-    def parse_callback(self, request_data: dict[str, Any]) -> BankCallbackData:
+    def parse_callback(
+        self,
+        request_data: dict[str, Any],
+        *,
+        amount: int | None = None,
+        order_id: str | None = None,
+    ) -> BankCallbackData:
         """
         Parse raw query/form params into BankCallbackData.
+
+        Pass ``amount`` and ``order_id`` when the bank does not include them in
+        the callback (e.g. Zarinpal only sends Authority and Status).  The
+        developer typically retrieves these from their own database.
+
         Override in gateways that need special parsing (e.g. XML body).
         """
         return BankCallbackData(
             gateway_slug=self.gateway_slug,
             raw=request_data,
+            amount=amount,
+            order_id=order_id,
         )
