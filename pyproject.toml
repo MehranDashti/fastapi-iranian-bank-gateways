@@ -50,10 +50,10 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/fastapi-iranian-bank-gateways"
-Repository = "https://github.com/yourusername/fastapi-iranian-bank-gateways"
-Changelog = "https://github.com/yourusername/fastapi-iranian-bank-gateways/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/yourusername/fastapi-iranian-bank-gateways#readme"
+Homepage = "https://github.com/MehranDashti/fastapi-iranian-bank-gateways"
+Repository = "https://github.com/MehranDashti/fastapi-iranian-bank-gateways"
+Changelog = "https://github.com/MehranDashti/fastapi-iranian-bank-gateways/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/MehranDashti/fastapi-iranian-bank-gateways#readme"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fastapi_iranian_bank_gateways"]
