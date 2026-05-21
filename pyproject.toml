@@ -33,7 +33,7 @@ dependencies = [
 [project.optional-dependencies]
 soap = [
     "zeep>=4.1.0,<5.0",
-    "lxml>=4.9.0,<6.0",
+    "lxml>=4.9.0,<7.0",
 ]
 dev = [
     "pytest>=7.0",
