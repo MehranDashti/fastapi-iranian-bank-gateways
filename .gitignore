@@ -9,6 +9,7 @@
 .claude_memory/
 *.claude_session
 .anthropic/
+CLAUDE.md
 
 # -----------------------------------------------------------------------------
 # Python bytecode and cache
