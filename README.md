@@ -1,5 +1,11 @@
 # fastapi-iranian-bank-gateways
 
+[![Tests](https://github.com/MehranDashti/fastapi-iranian-bank-gateways/actions/workflows/test.yml/badge.svg)](https://github.com/MehranDashti/fastapi-iranian-bank-gateways/actions/workflows/test.yml)
+[![PyPI version](https://img.shields.io/pypi/v/fastapi-iranian-bank-gateways.svg)](https://pypi.org/project/fastapi-iranian-bank-gateways/)
+[![Python versions](https://img.shields.io/pypi/pyversions/fastapi-iranian-bank-gateways.svg)](https://pypi.org/project/fastapi-iranian-bank-gateways/)
+[![Downloads](https://img.shields.io/pypi/dm/fastapi-iranian-bank-gateways.svg)](https://pypi.org/project/fastapi-iranian-bank-gateways/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A pip-installable Python package providing **FastAPI integration for all major Iranian bank payment gateways** (درگاه‌های پرداخت بانکی ایران).
 
 Drop 17 gateways into any FastAPI app in minutes — no database required, fully async, Pydantic v2.
