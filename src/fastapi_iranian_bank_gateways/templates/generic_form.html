@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>در حال انتقال به درگاه پرداخت...</title>
+  <style>
+    body { font-family: Tahoma, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5; }
+    .box { text-align: center; padding: 2rem; background: #fff; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,.1); }
+    p { color: #555; margin-top: .5rem; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h3>در حال انتقال به درگاه پرداخت</h3>
+    <p>لطفاً صبر کنید...</p>
+  </div>
+  <form id="gw-form" method="{{ method }}" action="{{ action }}" style="display:none">
+    {% for name, value in fields.items() %}
+    <input type="hidden" name="{{ name }}" value="{{ value }}">
+    {% endfor %}
+  </form>
+  <script>document.getElementById('gw-form').submit();</script>
+</body>
+</html>
