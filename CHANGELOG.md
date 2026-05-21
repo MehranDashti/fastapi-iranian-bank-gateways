@@ -41,5 +41,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Makefile: install / test / lint / type-check / format / coverage / build / clean
 - 113 tests, 90% coverage (pytest + respx for HTTP mocking, unittest.mock for SOAP)
 
-[Unreleased]: https://github.com/yourusername/fastapi-iranian-bank-gateways/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/yourusername/fastapi-iranian-bank-gateways/releases/tag/v0.1.0
+[Unreleased]: https://github.com/MehranDashti/fastapi-iranian-bank-gateways/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/MehranDashti/fastapi-iranian-bank-gateways/releases/tag/v0.1.0
